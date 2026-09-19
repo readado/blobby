@@ -9,14 +9,21 @@ final class GameScene: SKScene {
     }
 
     private let model: GameModel
-    private let blobby = BlobbyNode()
-    private let shelter = ShelterNode()
+    private lazy var blobby = BlobbyNode()
+    private lazy var shelter = ShelterNode()
     private let seafloor = SKShapeNode()
-    private let backgroundArt = SKSpriteNode(imageNamed: "DeepBackground")
+    /// Solid until the painted background is attached after the first frame.
+    /// Decoding that texture during `didMove` was stalling the first present.
+    private let backgroundArt = SKSpriteNode(
+        color: UIColor(red: 0.01, green: 0.045, blue: 0.10, alpha: 1),
+        size: .zero
+    )
 
     private var foodNodes: [FoodNode] = []
-    private var snowNodes: [MarineSnowNode] = []
+    private let snowEmitter = SKEmitterNode()
     private var predator: PredatorNode?
+    private var giant: GiantPasserbyNode?
+    private var giantTimer: TimeInterval = .random(in: 10...18)
     private var targetPoint = CGPoint.zero
     private var previousUpdateTime: TimeInterval = 0
     private var foodTimer: TimeInterval = 0
@@ -30,6 +37,9 @@ final class GameScene: SKScene {
     private var lives = 3
     private var predatorHasStruck = false
     private var shelterRewarded = false
+    private var shakePulseTimes: [TimeInterval] = []
+    private var puffTimeRemaining: TimeInterval = 0
+    private var lastContentmentPublish: TimeInterval = -.infinity
     #if DEBUG
     private var isVerifying = false
     #endif
@@ -59,6 +69,8 @@ final class GameScene: SKScene {
     override func didMove(to view: SKView) {
         backgroundColor = UIColor(red: 0.01, green: 0.045, blue: 0.10, alpha: 1)
         view.preferredFramesPerSecond = 60
+        // Keep the first frames light: build the habitat, then warm audio/haptics
+        // on the next run-loop turn so Metal can present once without waiting on WAV decode.
         buildHabitat()
         layoutScene()
         targetPoint = blobby.position
@@ -67,9 +79,19 @@ final class GameScene: SKScene {
             soundEnabled: model.soundEnabled,
             hapticsEnabled: model.hapticsEnabled
         )
-        GameFeedback.shared.startAmbience()
+        DispatchQueue.main.async { [weak self] in
+            guard self != nil else { return }
+            GameFeedback.shared.warmUpIfNeeded()
+            // Ambience after a beat so texture upload + first present aren't competing.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                GameFeedback.shared.startAmbience()
+            }
+        }
         #if DEBUG
         if ProcessInfo.processInfo.environment["BLOBBY_VERIFY"] == "1" {
+            // Verification needs audio/haptics ready immediately.
+            GameFeedback.shared.warmUpIfNeeded()
+            GameFeedback.shared.startAmbience()
             verifyGameplay()
         }
         #endif
@@ -85,8 +107,13 @@ final class GameScene: SKScene {
 
         backgroundArt.anchorPoint = .zero
         backgroundArt.zPosition = -30
-        backgroundArt.texture?.filteringMode = .linear
         addChild(backgroundArt)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let texture = SKTexture(imageNamed: "DeepBackground")
+            texture.filteringMode = .linear
+            self.backgroundArt.texture = texture
+        }
 
         let distantGlow = SKShapeNode(circleOfRadius: 190)
         distantGlow.fillColor = UIColor(red: 0.02, green: 0.18, blue: 0.24, alpha: 0.18)
@@ -101,11 +128,8 @@ final class GameScene: SKScene {
         seafloor.zPosition = -3
         addChild(seafloor)
 
-        for _ in 0..<42 {
-            let snow = MarineSnowNode(sceneSize: size)
-            snowNodes.append(snow)
-            addChild(snow)
-        }
+        configureSnowEmitter()
+        addChild(snowEmitter)
 
         shelter.zPosition = 2
         addChild(shelter)
@@ -133,6 +157,9 @@ final class GameScene: SKScene {
         seafloor.path = floorPath
 
         shelter.position = CGPoint(x: 94, y: max(150, size.height * 0.21))
+
+        snowEmitter.position = CGPoint(x: size.width / 2, y: size.height / 2)
+        snowEmitter.particlePositionRange = CGVector(dx: size.width, dy: size.height)
 
         if blobby.position == .zero {
             blobby.position = CGPoint(x: size.width * 0.48, y: size.height * 0.52)
@@ -162,6 +189,83 @@ final class GameScene: SKScene {
         previousUpdateTime = 0
     }
 
+    // MARK: - Assistive guidance (non-drag alternatives)
+
+    /// Nudge Blobby’s target in a cardinal direction (VoiceOver / on-screen pad).
+    func assistNudge(dx: CGFloat, dy: CGFloat) {
+        guard !model.isGameplayPaused else { return }
+        let step: CGFloat = 78
+        let next = CGPoint(
+            x: blobby.position.x + dx * step,
+            y: blobby.position.y + dy * step
+        )
+        targetPoint = clamped(next)
+        blobby.lookToward(targetPoint)
+    }
+
+    func assistGuideToShelter() {
+        guard !model.isGameplayPaused else { return }
+        targetPoint = shelterCenter
+        blobby.lookToward(targetPoint)
+        announceAccessibility("Guiding Blobby to the coral shelter")
+    }
+
+    func assistGuideToNearestFood() {
+        guard !model.isGameplayPaused else { return }
+        guard let nearest = foodNodes.min(by: {
+            distance($0.position, blobby.position) < distance($1.position, blobby.position)
+        }) else {
+            setBanner("No snacks nearby", kind: .info, clearsAfter: 1.6)
+            return
+        }
+        targetPoint = clamped(nearest.position)
+        blobby.lookToward(targetPoint)
+        announceAccessibility("Guiding Blobby toward a snack")
+    }
+
+    /// Button / accessibility alternative to the triple-shake puff.
+    func assistPuff() {
+        activatePuffIfNeeded(afterRegisteringPulse: false)
+    }
+
+    // MARK: - Triple-shake puff
+
+    var puffScale: CGFloat { blobby.puffScale }
+
+    /// Called for each shake pulse: a UIEvent `.motionShake` (simulator /
+    /// accessibility) or a ≥2.4g accelerometer peak from Core Motion
+    /// (device). Three pulses inside 2.2s puff Blobby to 2× for 4 seconds.
+    /// Debouncing peaks within one swing is the caller's job.
+    func registerShakePulse() {
+        activatePuffIfNeeded(afterRegisteringPulse: true)
+    }
+
+    func activatePuffIfNeeded() {
+        activatePuffIfNeeded(afterRegisteringPulse: false)
+    }
+
+    private func activatePuffIfNeeded(afterRegisteringPulse: Bool) {
+        guard !model.isGameplayPaused else { return }
+        guard puffTimeRemaining <= 0 else { return }
+        if afterRegisteringPulse {
+            let now = CACurrentMediaTime()
+            shakePulseTimes = shakePulseTimes.filter { now - $0 <= 2.2 }
+            shakePulseTimes.append(now)
+            guard shakePulseTimes.count >= 3 else { return }
+            shakePulseTimes.removeAll()
+        }
+        puffTimeRemaining = 4.0
+        blobby.puffUp()
+        setBanner("Puffed up!", kind: .success, clearsAfter: 1.6)
+        GameFeedback.shared.puffed()
+    }
+
+    private func cancelPuff() {
+        puffTimeRemaining = 0
+        shakePulseTimes.removeAll()
+        blobby.cancelPuff()
+    }
+
     override func update(_ currentTime: TimeInterval) {
         #if DEBUG
         if !isVerifying, ProcessInfo.processInfo.environment["BLOBBY_UI_STATE"] != nil { return }
@@ -175,15 +279,65 @@ final class GameScene: SKScene {
         previousUpdateTime = currentTime
 
         let frameDelta = CGFloat(dt)
-        updateSnow(dt: frameDelta)
+        updateSnow()
         elapsedPlayTime += dt
+        if puffTimeRemaining > 0 {
+            puffTimeRemaining -= dt
+            if puffTimeRemaining <= 0 {
+                puffTimeRemaining = 0
+                blobby.endPuff()
+            }
+        }
         updateBlobby(dt: frameDelta, time: currentTime)
         updateFood(dt: frameDelta, time: currentTime)
         updatePredator(dt: frameDelta)
+        updateGiant(dt: frameDelta)
         updateHUD()
     }
 
+    /// Ambient giants drift behind everything and never touch gameplay.
+    /// Calm motion disables new spawns; an in-flight giant simply finishes
+    /// its slow crossing.
+    private func updateGiant(dt: CGFloat) {
+        if let giant {
+            giant.position.x += giant.direction * giant.swimSpeed * dt
+            let margin = giant.halfWidth + 80
+            let offLeft = giant.direction < 0 && giant.position.x < -margin
+            let offRight = giant.direction > 0 && giant.position.x > size.width + margin
+            if offLeft || offRight {
+                giant.removeFromParent()
+                self.giant = nil
+            }
+            return
+        }
+        giantTimer -= TimeInterval(dt)
+        if giantTimer <= 0 {
+            giantTimer = .random(in: 40...75)
+            if !model.calmMotionEnabled {
+                spawnGiant()
+            }
+        }
+    }
+
+    private func spawnGiant() {
+        let movingLeft = Bool.random()
+        let passerby = GiantPasserbyNode(
+            kind: GiantKind.allCases.randomElement() ?? .spermWhale,
+            movingLeft: movingLeft
+        )
+        passerby.position = CGPoint(
+            x: movingLeft ? size.width + passerby.halfWidth + 40 : -(passerby.halfWidth + 40),
+            y: .random(in: size.height * 0.38...size.height * 0.62)
+        )
+        passerby.zPosition = -15
+        giant = passerby
+        addChild(passerby)
+    }
+
     private func updateBlobby(dt: CGFloat, time: TimeInterval) {
+        // A stale targetPoint (e.g. from an old session) must respect the
+        // current chrome-safe, puff-aware playfield too.
+        targetPoint = clamped(targetPoint)
         let dx = targetPoint.x - blobby.position.x
         let dy = targetPoint.y - blobby.position.y
         let distance = hypot(dx, dy)
@@ -199,9 +353,9 @@ final class GameScene: SKScene {
             wasSheltered = safe
             if safe {
                 GameFeedback.shared.reachedSafety()
-                setBanner("Safe and snug", kind: .success)
+                setBanner("Safe and snug", kind: .success, announce: true)
             } else if predatorPhase != .idle {
-                setBanner(incomingPredatorKind.warningText, kind: .warning)
+                setBanner(incomingPredatorKind.warningText, kind: .warning, announce: true)
             } else {
                 setBanner("Time for a snack", kind: .info, clearsAfter: 2)
             }
@@ -213,15 +367,38 @@ final class GameScene: SKScene {
         )
     }
 
-    private func updateSnow(dt: CGFloat) {
-        for snow in snowNodes {
-            snow.position.y -= snow.fallSpeed * dt
-            snow.position.x += snow.driftSpeed * dt
-            if snow.position.y < -5 {
-                snow.position = CGPoint(x: .random(in: 0...size.width), y: size.height + 5)
-            }
-            if snow.position.x > size.width + 5 { snow.position.x = -5 }
+    private func updateSnow() {
+        // The emitter moves itself; we only thin the snowfall for calm motion.
+        let rate: CGFloat = model.calmMotionEnabled ? 0.2 : 0.6
+        if snowEmitter.particleBirthRate != rate {
+            snowEmitter.particleBirthRate = rate
         }
+    }
+
+    /// One GPU-driven emitter replaces the old 42 hand-moved shape nodes.
+    /// Dot texture is drawn procedurally; ~42 flakes alive at any time.
+    private func configureSnowEmitter() {
+        let dot = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).image { context in
+            UIColor.white.setFill()
+            context.cgContext.fillEllipse(in: CGRect(x: 0, y: 0, width: 8, height: 8))
+        }
+        snowEmitter.particleTexture = SKTexture(image: dot)
+        snowEmitter.particleBirthRate = model.calmMotionEnabled ? 0.2 : 0.6
+        snowEmitter.particleLifetime = 70
+        snowEmitter.particleLifetimeRange = 20
+        snowEmitter.particleSpeed = 14
+        snowEmitter.particleSpeedRange = 8
+        snowEmitter.emissionAngle = -.pi / 2
+        snowEmitter.emissionAngleRange = 0.12
+        snowEmitter.particleAlpha = 0.27
+        snowEmitter.particleAlphaRange = 0.15
+        snowEmitter.particleScale = 0.28
+        snowEmitter.particleScaleRange = 0.16
+        snowEmitter.zPosition = -5
+        // A full 70s warmup allocates the whole lifetime of flakes on the
+        // first frame and was the launch hitch on device. A short warmup
+        // is enough for the habitat not to start empty.
+        snowEmitter.advanceSimulationTime(1.2)
     }
 
     private func updateFood(dt: CGFloat, time: TimeInterval) {
@@ -242,7 +419,7 @@ final class GameScene: SKScene {
                 food.position = previousPosition
             }
 
-            if distance(food.position, blobby.mouthPositionInScene) < 31 {
+            if distance(food.position, blobby.mouthPositionInScene) < 31 * blobby.puffScale {
                 contentment = min(100, contentment + 8)
                 model.snacksEaten += 1
                 if lives < 3 {
@@ -350,8 +527,9 @@ final class GameScene: SKScene {
         // Allow the entire trip at Blobby's slower approach speed, plus reaction time.
         predatorPhaseTime = max(5, Double(distance(blobby.position, shelterCenter)) / 70 + 2)
         setBanner(isBlobbySheltered ? "Safe and snug" : incomingPredatorKind.warningText,
-                  kind: isBlobbySheltered ? .success : .warning)
-        shelter.setActive(true)
+                  kind: isBlobbySheltered ? .success : .warning,
+                  announce: true)
+        shelter.setActive(true, calmMotion: model.calmMotionEnabled)
         GameFeedback.shared.predatorWarning()
     }
 
@@ -376,8 +554,8 @@ final class GameScene: SKScene {
             model.predatorsAvoided += 1
         }
         shelterRewarded = false
-        shelter.setActive(false)
-        setBanner("The coast is clear", kind: .info, clearsAfter: 2.5)
+        shelter.setActive(false, calmMotion: model.calmMotionEnabled)
+        setBanner("The coast is clear", kind: .info, clearsAfter: 2.5, announce: true)
     }
 
     private func registerCloseCall() {
@@ -392,7 +570,7 @@ final class GameScene: SKScene {
             color: UIColor(red: 1, green: 0.70, blue: 0.30, alpha: 1),
             fontSize: 20
         )
-        setBanner("That was close!", kind: .danger)
+        setBanner("That was close!", kind: .danger, announce: true)
         updateHUD()
 
         if lives == 0 {
@@ -403,13 +581,15 @@ final class GameScene: SKScene {
     private func showGameOver() {
         guard !model.isGameOver else { return }
         GameFeedback.shared.gameOver()
+        cancelPuff()
         removeAction(forKey: "clearBanner")
         predator?.removeFromParent()
         predator = nil
-        shelter.setActive(false)
+        shelter.setActive(false, calmMotion: model.calmMotionEnabled)
         model.isGameOver = true
         model.saveRecords()
         model.banner = nil
+        announceAccessibility("Game Over. Snacks eaten \(model.snacksEaten). Predators avoided \(model.predatorsAvoided).")
     }
 
     private func restartGame() {
@@ -419,6 +599,9 @@ final class GameScene: SKScene {
         foodNodes.removeAll()
         predator?.removeFromParent()
         predator = nil
+        giant?.removeFromParent()
+        giant = nil
+        giantTimer = .random(in: 10...18)
 
         lives = 3
         contentment = 55
@@ -434,10 +617,12 @@ final class GameScene: SKScene {
         shelterRewarded = false
         foodTimer = 0
         previousUpdateTime = 0
+        lastContentmentPublish = -.infinity
         model.isGameOver = false
 
-        shelter.setActive(false)
-        setBanner("A fresh start", kind: .info, clearsAfter: 1.8)
+        shelter.setActive(false, calmMotion: model.calmMotionEnabled)
+        setBanner("A fresh start", kind: .info, clearsAfter: 1.8, announce: true)
+        cancelPuff()
 
         blobby.resetPose()
         blobby.position = CGPoint(x: size.width * 0.48, y: size.height * 0.52)
@@ -493,9 +678,17 @@ final class GameScene: SKScene {
         ]))
     }
 
-    private func setBanner(_ text: String, kind: GameBanner.Kind, clearsAfter delay: TimeInterval? = nil) {
+    private func setBanner(
+        _ text: String,
+        kind: GameBanner.Kind,
+        clearsAfter delay: TimeInterval? = nil,
+        announce: Bool = false
+    ) {
         removeAction(forKey: "clearBanner")
         model.banner = GameBanner(text: text, kind: kind)
+        if announce {
+            announceAccessibility(text)
+        }
         guard let delay else { return }
 
         let expectedText = text
@@ -511,6 +704,10 @@ final class GameScene: SKScene {
         )
     }
 
+    private func announceAccessibility(_ message: String) {
+        UIAccessibility.post(notification: .announcement, argument: message)
+    }
+
     private var shelterCenter: CGPoint {
         CGPoint(x: shelter.position.x + 2, y: shelter.position.y - 17)
     }
@@ -522,9 +719,16 @@ final class GameScene: SKScene {
     }
 
     private func updateHUD() {
+        // The contentment bar decays continuously, so publishing every frame
+        // rebuilt the Liquid Glass HUD at 60Hz. Publish at ~8Hz at most, or
+        // immediately when the displayed percent changes.
         let nextValue = Double(contentment / 100)
-        if abs(model.contentmentValue - nextValue) > 0.002 {
-            model.contentmentValue = nextValue
+        let percentChanged = Int(nextValue * 100) != Int(model.contentmentValue * 100)
+        if percentChanged || elapsedPlayTime - lastContentmentPublish >= 0.125 {
+            if model.contentmentValue != nextValue {
+                model.contentmentValue = nextValue
+            }
+            lastContentmentPublish = elapsedPlayTime
         }
         if model.contentmentText != contentmentDescription {
             model.contentmentText = contentmentDescription
@@ -543,10 +747,18 @@ final class GameScene: SKScene {
         }
     }
 
+    /// Playable-area clamp. The top inset tracks the real chrome (safe area +
+    /// status capsule + gear) instead of a magic constant, and every inset
+    /// grows with the puff so a 2× Blobby can never reach the gear, hide under
+    /// the HUD, or clip the seafloor.
     private func clamped(_ point: CGPoint) -> CGPoint {
-        CGPoint(
-            x: min(max(point.x, 48), max(48, size.width - 48)),
-            y: min(max(point.y, 95), max(95, size.height - 120))
+        let puff = blobby.puffScale
+        let sideInset = 48 * puff
+        let topInset = (view?.safeAreaInsets.top ?? 0) + 72 * puff
+        let bottomInset = 95 * puff
+        return CGPoint(
+            x: min(max(point.x, sideInset), max(sideInset, size.width - sideInset)),
+            y: min(max(point.y, bottomInset), max(bottomInset, size.height - topInset))
         )
     }
 
@@ -563,7 +775,9 @@ final class GameScene: SKScene {
         let reloaded = GameModel(defaults: defaults)
         if ProcessInfo.processInfo.environment["BLOBBY_VERIFY_PERSISTENCE"] == "1" {
             assert(!reloaded.soundEnabled && !reloaded.hapticsEnabled && reloaded.calmMotionEnabled)
-            assert(!reloaded.isTutorialPresented && reloaded.bestSnacks >= model.snacksPerHeart + 10)
+            // The tutorial is once-only until dismissed.
+            assert(reloaded.isTutorialPresented == !defaults.bool(forKey: "didSeeBlobbyTutorialV2"))
+            assert(reloaded.bestSnacks >= model.snacksPerHeart + 10)
             assert(reloaded.bestAvoided >= 1)
             NSLog("BLOBBY_PERSISTENCE_CHECKS_PASSED")
         }
@@ -674,6 +888,45 @@ final class GameScene: SKScene {
             assert(model.contentmentText == text)
         }
         restartGame()
+        // Triple-shake puff. A real violent shake arrives via Core Motion
+        // peaks and Device → Shake arrives via motionEnded; both funnel into
+        // registerShakePulse(), so three rapid pulses stand in for them here.
+        // The death haptic itself is device-only (Core Haptics with a UIKit
+        // fallback); only its once-per-Game-Over count is asserted above.
+        assert(puffScale == 1)
+        registerShakePulse()
+        registerShakePulse()
+        registerShakePulse()
+        assert(puffScale == 2)
+        registerShakePulse() // a fourth shake during the puff is ignored
+        assert(puffScale == 2)
+        var verifyClock: TimeInterval = 1000
+        for _ in 0..<246 { // 4.1s of game time at 60fps
+            verifyClock += 1.0 / 60.0
+            update(verifyClock)
+        }
+        assert(puffScale == 1)
+        // Button / accessibility puff path (no shake required).
+        assistPuff()
+        assert(puffScale == 2)
+        cancelPuff()
+        assert(puffScale == 1)
+        assistGuideToShelter()
+        assert(distance(targetPoint, shelterCenter) < 1)
+        assistNudge(dx: 1, dy: 0)
+        assert(targetPoint.x > blobby.position.x - 1)
+        // Ambient giants are visual-only: spawning one and letting it drift
+        // must not touch lives, food, or timers.
+        spawnGiant()
+        assert(giant != nil)
+        for _ in 0..<120 { // 2s of game time
+            verifyClock += 1.0 / 60.0
+            update(verifyClock)
+        }
+        assert(lives == 3 && !model.isGameOver)
+        assert(giant == nil || giant!.parent === self)
+        restartGame()
+        assert(giant == nil)
         model.isTutorialPresented = originalTutorial
         model.isAppActive = originalActive
         NSLog("BLOBBY_GAMEPLAY_CHECKS_PASSED")
@@ -684,6 +937,10 @@ final class GameScene: SKScene {
                 model.lives = 2
                 model.snacksTowardHeart = 49
                 model.banner = GameBanner(text: PredatorKind.sixgillShark.warningText, kind: .warning)
+            }
+            if fixture == "giant" {
+                spawnGiant()
+                giant?.position = CGPoint(x: size.width * 0.5, y: size.height * 0.5)
             }
         }
         if ProcessInfo.processInfo.environment["BLOBBY_RESULTS_PREVIEW"] == "1" {

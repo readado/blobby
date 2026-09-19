@@ -1,0 +1,11 @@
+{
+  "images" : [
+    {"filename":"blobby-eating.png","idiom":"universal","scale":"1x"},
+    {"filename":"blobby-eating@2x.png","idiom":"universal","scale":"2x"},
+    {"filename":"blobby-eating@3x.png","idiom":"universal","scale":"3x"}
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

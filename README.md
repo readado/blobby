@@ -2,7 +2,7 @@
 
 A tiny iPhone habitat game about guiding a laid-back blobfish through the deep sea.
 
-<img src="Blobby/Resources/Assets.xcassets/BlobbyNeutral.imageset/blobby-neutral.png" alt="Blobby, a pink illustrated blobfish" width="220">
+<img src="Blobby/Resources/Assets.xcassets/Game.atlas/BlobbyNeutral.imageset/blobby-neutral.png" alt="Blobby, a pink illustrated blobfish" width="220">
 
 Built with **Swift + SpriteKit** for gameplay and **SwiftUI** for the app interface. This is a playable V1 prototype: gently guide Blobby toward snacks, hide in a coral crevice when predators approach, and try to keep all three hearts.
 
@@ -35,7 +35,9 @@ For a physical iPhone, select your own team under **Signing & Capabilities**, ch
 - Bottom creatures spawn with space between them, and stop behind other creatures.
 - The first predator comes after 22–28 seconds of active play. Visits gradually become more frequent over four minutes, with warning time adjusted for the trip to shelter.
 - Game Over presents a front-facing sad Blobby with his classic droopy blobfish frown.
-- A first-play tutorial explains drifting, eating, and hiding.
+- A first-play tutorial explains drifting, eating, hiding, and puffing. It shows once; reopen it from Settings → How to play.
+- Shake the phone hard three times, or tap Puff, to double Blobby’s size for a few seconds. Settings can show on-screen move, shelter, snack, and puff controls. VoiceOver and Switch Control turn those controls on automatically.
+- A distant sperm whale or submarine silhouette occasionally drifts behind the habitat; it is purely decorative and never affects gameplay. Calm motion pauses these spawns.
 - Underwater ambience and distinct eating, predator-warning, and close-call sounds provide feedback.
 - Eating, reaching safety, losing a life, and restarting use subtle haptics on a physical iPhone.
 - Eating also gives Blobby a small floating “nom nom” reaction.
@@ -50,8 +52,10 @@ For a physical iPhone, select your own team under **Signing & Capabilities**, ch
 - Earlier supported iOS versions use system materials as a fallback.
 - Controls use semantic SwiftUI text, SF Symbols, VoiceOver labels, and comfortable touch targets.
 - Status messages pair words with symbols rather than relying on color alone.
-- Sound, haptics, and Calm Motion can be adjusted from the in-game Settings sheet.
-- The status panel stacks its hearts when horizontal space is tight. Tutorial and results cards scroll when needed for smaller screens or larger text.
+- Sound, haptics, Calm Motion, and assistive controls can be adjusted from the in-game Settings sheet.
+- The status panel stacks its hearts when horizontal space is tight. Tutorial and results cards keep Let’s blob and Restart on screen while the rest of the card scrolls, including at large accessibility text sizes.
+- Custom Liquid Glass falls back to solid fills when Reduce Transparency or Increase Contrast is on. Reduce Motion turns Calm Motion on.
+- The app icon includes light, dark, and tinted Home Screen variants.
 
 ## Readiness checks (Debug only)
 
@@ -63,7 +67,7 @@ For visual checks, also set `BLOBBY_COMPACT_CHECK=1` (a 320×568-point viewport)
 
 Remove these environment variables to resume normal gameplay. They have no effect in Release builds. A force-quit starts a new run; only preferences, tutorial completion, and best scores persist.
 
-Readiness pass (September 6, 2026): Debug and Release simulator builds passed on iOS 26.5. Gameplay and cross-launch persistence checks passed. Visually checked the 320×568-point viewport, larger accessibility text, scrollable tutorial, full predator warning, Game Over/Restart, and Settings pause. Real-device haptic feel and older-iOS runtime testing remain outstanding.
+Readiness pass (September 19, 2026): Debug simulator build passed on iOS 26.5 and `BLOBBY_GAMEPLAY_CHECKS_PASSED`. Tutorial and Game Over keep their primary buttons visible while the card scrolls. Launch no longer simulates a full minute of marine snow or decodes the background on the first frame. Real-device haptic feel still needs a physical check; older-iOS runtime testing remains outstanding.
 
 ## Illustrated art pass
 
@@ -72,7 +76,7 @@ Readiness pass (September 6, 2026): Debug and Release simulator builds passed on
 - Predator visits randomly select a toothfish, glowing-lure anglerfish, or sixgill shark. Each has a distinct silhouette, warning, size, and swimming pace.
 - A full-height painted deep-ocean background adds depth while leaving the play area readable.
 - The coral, sponge, and rock outcrop is an illustrated shelter with a clearly visible crevice.
-- A custom Blobby app icon is included.
+- A custom Blobby app icon is included, with dark and tinted variants for the OS 26 Home Screen.
 
 The illustrations are bundled prototype art and remain easy to replace in `Assets.xcassets` later.
 

@@ -5,6 +5,9 @@ xcuserdata/
 
 # Build products and local verification output
 work/
+uat/
+art-masters/
+KIMICODE_HANDOFF.md
 build/
 DerivedData/
 .build/

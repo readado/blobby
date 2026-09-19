@@ -94,35 +94,10 @@ final class FoodNode: SKNode {
     }
 }
 
-final class MarineSnowNode: SKShapeNode {
-    let fallSpeed = CGFloat.random(in: 7...22)
-    let driftSpeed = CGFloat.random(in: -2...5)
-
-    init(sceneSize: CGSize) {
-        super.init()
-        path = CGPath(
-            ellipseIn: CGRect(
-                x: -1,
-                y: -1,
-                width: .random(in: 1.2...3.5),
-                height: .random(in: 1.2...3.5)
-            ),
-            transform: nil
-        )
-        fillColor = UIColor.white.withAlphaComponent(.random(in: 0.12...0.42))
-        strokeColor = .clear
-        position = CGPoint(x: .random(in: 0...sceneSize.width), y: .random(in: 0...sceneSize.height))
-        zPosition = -5
-    }
-
-    required init?(coder aDecoder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-}
-
 final class ShelterNode: SKNode {
     private let art: SKSpriteNode
     private let glow = SKShapeNode(ellipseOf: CGSize(width: 214, height: 152))
+    private let hideLabel = SKLabelNode(fontNamed: "AvenirNext-Bold")
 
     override init() {
         let texture = SKTexture(imageNamed: "CoralShelter")
@@ -141,6 +116,14 @@ final class ShelterNode: SKNode {
         art.position = CGPoint(x: 0, y: 10)
         addChild(art)
 
+        hideLabel.text = "Hide!"
+        hideLabel.fontSize = 17
+        hideLabel.fontColor = UIColor(red: 0.75, green: 1, blue: 0.90, alpha: 1)
+        hideLabel.position = CGPoint(x: 0, y: 108)
+        hideLabel.zPosition = 3
+        hideLabel.alpha = 0
+        addChild(hideLabel)
+
         let creviceHint = SKShapeNode(ellipseOf: CGSize(width: 88, height: 56))
         creviceHint.fillColor = .clear
         creviceHint.strokeColor = UIColor(red: 0.50, green: 1, blue: 0.86, alpha: 0)
@@ -155,27 +138,145 @@ final class ShelterNode: SKNode {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func setActive(_ active: Bool) {
+    func setActive(_ active: Bool, calmMotion: Bool = false) {
         glow.removeAllActions()
+        hideLabel.removeAllActions()
         guard let creviceHint = childNode(withName: "creviceHint") as? SKShapeNode else { return }
         creviceHint.removeAllActions()
 
         if active {
-            glow.alpha = 0.72
-            creviceHint.strokeColor = UIColor(red: 0.50, green: 1, blue: 0.86, alpha: 0.56)
-            let pulse = SKAction.sequence([
-                .fadeAlpha(to: 0.30, duration: 0.65),
-                .fadeAlpha(to: 0.78, duration: 0.65)
-            ])
-            glow.run(.repeatForever(pulse))
-            creviceHint.run(.repeatForever(.sequence([
-                .fadeAlpha(to: 0.36, duration: 0.65),
-                .fadeAlpha(to: 1, duration: 0.65)
-            ])))
+            glow.lineWidth = 3
+            glow.strokeColor = UIColor(red: 0.37, green: 1, blue: 0.84, alpha: 0.6)
+            glow.alpha = 0.9
+            creviceHint.strokeColor = UIColor(red: 0.50, green: 1, blue: 0.86, alpha: 0.9)
+            hideLabel.fontColor = UIColor(red: 0.85, green: 1, blue: 0.94, alpha: 1)
+            hideLabel.alpha = 1
+            if calmMotion {
+                // Static high-contrast cue — no looping fade when Reduce Motion / Calm Motion is on.
+                glow.alpha = 1
+                creviceHint.alpha = 1
+                hideLabel.alpha = 1
+            } else {
+                let pulse = SKAction.sequence([
+                    .fadeAlpha(to: 0.5, duration: 0.5),
+                    .fadeAlpha(to: 0.9, duration: 0.5)
+                ])
+                glow.run(.repeatForever(pulse))
+                creviceHint.run(.repeatForever(.sequence([
+                    .fadeAlpha(to: 0.45, duration: 0.5),
+                    .fadeAlpha(to: 1, duration: 0.5)
+                ])))
+                hideLabel.run(.repeatForever(.sequence([
+                    .fadeAlpha(to: 0.55, duration: 0.5),
+                    .fadeAlpha(to: 1, duration: 0.5)
+                ])))
+            }
         } else {
             glow.alpha = 0
             creviceHint.strokeColor = .clear
+            hideLabel.alpha = 0
         }
+    }
+}
+
+// MARK: - Ambient background giants
+
+enum GiantKind: CaseIterable {
+    case spermWhale
+    case submarine
+}
+
+/// A huge, distant silhouette drifting slowly behind the habitat. Purely
+/// decorative: it never interacts with gameplay. The silhouette is drawn once
+/// into a single image (so overlapping parts don't double-darken) and softened
+/// with a blur to read as far away. (SKEffectNode + CIFilter was avoided:
+/// it renders empty in the simulator.)
+final class GiantPasserbyNode: SKSpriteNode {
+    let kind: GiantKind
+    let direction: CGFloat
+    let swimSpeed: CGFloat
+    let halfWidth: CGFloat
+
+    init(kind: GiantKind, movingLeft: Bool) {
+        self.kind = kind
+        direction = movingLeft ? -1 : 1
+        swimSpeed = kind == .submarine ? .random(in: 20...30) : .random(in: 15...23)
+        // Drawn slightly larger than needed, then scaled to fit within the
+        // screen so the whole creature stays readable.
+        let scale: CGFloat = kind == .submarine ? 0.78 : 0.7
+        halfWidth = (kind == .submarine ? 250 : 265) * scale
+        let texture = GiantPasserbyNode.makeTexture(kind: kind)
+        super.init(texture: texture, color: .clear, size: texture.size())
+        alpha = 0.42
+        xScale = (movingLeft ? 1 : -1) * scale
+        yScale = scale
+    }
+
+    required init?(coder aDecoder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    /// Shapes are laid out facing left, centered on the origin, then shifted
+    /// into a padded y-down canvas and filled in one pass.
+    private static func makeTexture(kind: GiantKind) -> SKTexture {
+        let pad: CGFloat = 20
+        let canvas: CGSize
+        let center: CGPoint
+        let silhouette = CGMutablePath()
+        let lights = CGMutablePath()
+        switch kind {
+        case .spermWhale:
+            canvas = CGSize(width: 540 + pad * 2, height: 190 + pad * 2)
+            center = CGPoint(x: 270 + pad, y: 95 + pad)
+            silhouette.addRoundedRect(in: CGRect(x: -250, y: -70, width: 190, height: 140), cornerWidth: 55, cornerHeight: 55) // blocky head
+            silhouette.addEllipse(in: CGRect(x: -130, y: -60, width: 260, height: 120)) // midbody
+            silhouette.addRoundedRect(in: CGRect(x: 120, y: -13, width: 90, height: 26), cornerWidth: 12, cornerHeight: 12) // tail stock
+            silhouette.addEllipse(in: CGRect(x: -95, y: -88, width: 56, height: 22)) // pectoral fin
+            silhouette.move(to: CGPoint(x: 195, y: 8)) // fluke
+            silhouette.addLine(to: CGPoint(x: 258, y: 32))
+            silhouette.addLine(to: CGPoint(x: 236, y: 0))
+            silhouette.addLine(to: CGPoint(x: 258, y: -32))
+            silhouette.addLine(to: CGPoint(x: 195, y: -8))
+            silhouette.closeSubpath()
+
+        case .submarine:
+            canvas = CGSize(width: 520 + pad * 2, height: 170 + pad * 2)
+            center = CGPoint(x: 260 + pad, y: 70 + pad)
+            silhouette.addRoundedRect(in: CGRect(x: -200, y: -45, width: 400, height: 90), cornerWidth: 45, cornerHeight: 45) // hull
+            silhouette.addRoundedRect(in: CGRect(x: -40, y: 38, width: 92, height: 58), cornerWidth: 14, cornerHeight: 14) // sail
+            silhouette.addRoundedRect(in: CGRect(x: -2, y: 92, width: 12, height: 26), cornerWidth: 5, cornerHeight: 5) // periscope
+            silhouette.addRoundedRect(in: CGRect(x: -2, y: 112, width: 34, height: 11), cornerWidth: 5, cornerHeight: 5)
+            silhouette.move(to: CGPoint(x: 185, y: 28)) // tail fins
+            silhouette.addLine(to: CGPoint(x: 248, y: 58))
+            silhouette.addLine(to: CGPoint(x: 225, y: 0))
+            silhouette.addLine(to: CGPoint(x: 248, y: -58))
+            silhouette.addLine(to: CGPoint(x: 185, y: -28))
+            silhouette.closeSubpath()
+            for index in 0..<4 {
+                lights.addEllipse(in: CGRect(x: -129 + index * 70, y: -7, width: 18, height: 18))
+            }
+        }
+
+        // SpriteKit-style y-up coords -> y-down image canvas.
+        var flip = CGAffineTransform(translationX: center.x, y: center.y).scaledBy(x: 1, y: -1)
+        let image = UIGraphicsImageRenderer(size: canvas).image { ctx in
+            let cg = ctx.cgContext
+            cg.addPath(silhouette.copy(using: &flip) ?? silhouette)
+            cg.setFillColor(UIColor(red: 0.0, green: 0.03, blue: 0.07, alpha: 1).cgColor)
+            cg.fillPath()
+            cg.addPath(lights.copy(using: &flip) ?? lights)
+            cg.setFillColor(UIColor(red: 0.55, green: 0.85, blue: 0.95, alpha: 1).cgColor)
+            cg.fillPath()
+        }
+
+        var finalImage = image
+        if let input = CIImage(image: image),
+           let blur = CIFilter(name: "CIGaussianBlur", parameters: ["inputRadius": 4]),
+           let output = blur.outputImage,
+           let cgImage = CIContext().createCGImage(output, from: CGRect(origin: .zero, size: canvas)) {
+            finalImage = UIImage(cgImage: cgImage)
+        }
+        return SKTexture(image: finalImage)
     }
 }
 

@@ -9,6 +9,10 @@ final class BlobbyNode: SKNode {
     private let artContainer = SKNode()
     private let softGlow = SKShapeNode(ellipseOf: CGSize(width: 92, height: 68))
     private var facing: CGFloat = 1
+    /// Logical puff multiplier (1 or 2). Kept separate from the node's scale
+    /// animation so gameplay (eat radius, clamps) reads a stable value even
+    /// while the ease in/out is still running.
+    private(set) var puffScale: CGFloat = 1
 
     var mouthPositionInScene: CGPoint {
         convert(CGPoint(x: 46 * facing, y: -5), to: parent ?? self)
@@ -31,10 +35,18 @@ final class BlobbyNode: SKNode {
 
         let name = SKLabelNode(fontNamed: "AvenirNext-DemiBold")
         name.text = "Blobby"
-        name.fontSize = 12
-        name.fontColor = UIColor.white.withAlphaComponent(0.76)
+        name.fontSize = 13
+        name.fontColor = .white
         name.position = CGPoint(x: 0, y: -60)
         name.zPosition = 2
+        // Soft shadow so the name stays readable over bright coral.
+        let nameShadow = SKLabelNode(fontNamed: "AvenirNext-DemiBold")
+        nameShadow.text = "Blobby"
+        nameShadow.fontSize = 13
+        nameShadow.fontColor = UIColor.black.withAlphaComponent(0.55)
+        nameShadow.position = CGPoint(x: 0.8, y: -61.2)
+        nameShadow.zPosition = 1
+        addChild(nameShadow)
         addChild(name)
     }
 
@@ -52,8 +64,10 @@ final class BlobbyNode: SKNode {
     }
 
     func updateMotion(time: TimeInterval, isSheltered: Bool, calmMotion: Bool) {
+        // The idle bob lives on the art container so it never fights the
+        // puff scale animation on the node itself.
         let pulse = calmMotion ? 1 : 1 + CGFloat(sin(time * 2)) * 0.015
-        yScale = pulse
+        artContainer.yScale = pulse
         alpha = isSheltered ? 0.88 : 1
 
         if isSheltered {
@@ -105,13 +119,39 @@ final class BlobbyNode: SKNode {
         ]), withKey: "expression")
     }
 
+    func puffUp() {
+        guard puffScale != 2 else { return }
+        puffScale = 2
+        removeAction(forKey: "puff")
+        let grow = SKAction.scale(to: 2, duration: 0.18)
+        grow.timingMode = .easeOut
+        run(grow, withKey: "puff")
+    }
+
+    func endPuff() {
+        guard puffScale != 1 else { return }
+        puffScale = 1
+        removeAction(forKey: "puff")
+        let shrink = SKAction.scale(to: 1, duration: 0.22)
+        shrink.timingMode = .easeIn
+        run(shrink, withKey: "puff")
+    }
+
+    func cancelPuff() {
+        puffScale = 1
+        removeAction(forKey: "puff")
+        setScale(1)
+    }
+
     func resetPose() {
         removeAllActions()
         sprite.removeAllActions()
         facing = 1
+        puffScale = 1
         xScale = 1
         yScale = 1
         artContainer.xScale = 1
+        artContainer.yScale = 1
         sprite.setScale(1)
         sprite.zRotation = 0
         sprite.texture = neutralTexture

@@ -33,6 +33,12 @@ final class GameModel: ObservableObject {
         !isAppActive || isTutorialPresented || isSettingsPresented || isGameOver
     }
 
+    /// Shows on-screen move / shelter / snack / puff controls. Defaults on when
+    /// VoiceOver or Switch Control is running; always available from Settings.
+    @Published var assistiveControlsEnabled: Bool {
+        didSet { defaults.set(assistiveControlsEnabled, forKey: "assistiveControlsEnabled") }
+    }
+
     @Published var soundEnabled: Bool {
         didSet {
             defaults.set(soundEnabled, forKey: "soundEnabled")
@@ -62,12 +68,36 @@ final class GameModel: ObservableObject {
         soundEnabled = defaults.object(forKey: "soundEnabled") as? Bool ?? true
         hapticsEnabled = defaults.object(forKey: "hapticsEnabled") as? Bool ?? true
         calmMotionEnabled = defaults.object(forKey: "calmMotionEnabled") as? Bool ?? UIAccessibility.isReduceMotionEnabled
+        let a11yControlsPreferred = UIAccessibility.isVoiceOverRunning || UIAccessibility.isSwitchControlRunning
+        assistiveControlsEnabled = defaults.object(forKey: "assistiveControlsEnabled") as? Bool ?? a11yControlsPreferred
+        // Once-only onboarding; Settings → How to play can reopen it.
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["BLOBBY_FORCE_TUTORIAL"] == "1" {
+            isTutorialPresented = true
+        } else {
+            isTutorialPresented = !defaults.bool(forKey: "didSeeBlobbyTutorialV2")
+        }
+        #else
         isTutorialPresented = !defaults.bool(forKey: "didSeeBlobbyTutorialV2")
+        #endif
     }
 
     func dismissTutorial() {
         defaults.set(true, forKey: "didSeeBlobbyTutorialV2")
         isTutorialPresented = false
+    }
+
+    func presentTutorial() {
+        isSettingsPresented = false
+        isTutorialPresented = true
+    }
+
+    /// When the system Reduce Motion setting turns on, force Calm Motion.
+    /// Turning Reduce Motion off leaves the player's Calm Motion preference alone.
+    func applySystemReduceMotion(_ reduceMotion: Bool) {
+        if reduceMotion, !calmMotionEnabled {
+            calmMotionEnabled = true
+        }
     }
 
     func restart() {
